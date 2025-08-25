@@ -1,14 +1,13 @@
-# app.py — Sahayak (Indic Study Buddy)
-# Simple version with Summary / Flashcards / Quiz
-# Uses text_generation (serverless-friendly) + fixed model ID
+# app.py — Sahayak (Indic Study Buddy) — Mistral-only
+# Summary / Flashcards / Quiz; replies in same language; robust Mistral fallback
 
-import os
 import traceback
 import streamlit as st
 from huggingface_hub import InferenceClient
+from huggingface_hub.utils._errors import HfHubHTTPError
 
 # ---------------------------- PAGE CONFIG ----------------------------
-st.set_page_config(page_title="Sahayak — Indic Study Buddy", page_icon="📚")
+st.set_page_config(page_title="Sahayak — Indic Study Buddy (Mistral)", page_icon="📚")
 
 # ---------------------------- SYSTEM PROMPT --------------------------
 SYSTEM_PROMPT = """
@@ -37,23 +36,58 @@ Guidelines:
 - Be respectful and neutral. Do not give definitive medical, legal, or financial advice.
 """
 
-# ---------------------------- TOKEN & MODEL --------------------------
+# ---------------------------- TOKEN ----------------------------
 HF_TOKEN = st.secrets.get("HF_TOKEN")
-MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"   # ✅ fixed ID
+if not HF_TOKEN:
+    st.error('Missing HF token. In Streamlit: Settings → Secrets → add\n\nHF_TOKEN = "hf_xxx"\n\nthen Restart.')
+    st.stop()
 
-client = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
+# ---------------------------- MISTRAL-ONLY CANDIDATES ----------------------------
+# We will try these Mistral-family models in order until one works on the serverless API.
+MISTRAL_MODELS = [
+    "mistralai/Mistral-7B-Instruct-v0.3",
+    "mistralai/Mistral-Nemo-Instruct-2407",
+    "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "mistralai/Mistral-7B-Instruct-v0.2",
+]
 
-# ---------------------------- HELPERS --------------------------
+def get_mistral_client():
+    if "ACTIVE_MODEL" in st.session_state and "HF_CLIENT" in st.session_state:
+        return st.session_state.HF_CLIENT, st.session_state.ACTIVE_MODEL
+
+    last_err = None
+    for mid in MISTRAL_MODELS:
+        try:
+            cli = InferenceClient(model=mid, token=HF_TOKEN)
+            # Tiny probe to confirm the endpoint exists
+            _ = cli.text_generation("ping", max_new_tokens=1, return_full_text=False, stream=False)
+            st.session_state.ACTIVE_MODEL = mid
+            st.session_state.HF_CLIENT = cli
+            return cli, mid
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"No Mistral serverless endpoint responded. Last error: {type(last_err).__name__}: {last_err}")
+
+try:
+    client, ACTIVE_MODEL = get_mistral_client()
+except Exception as e:
+    st.error("Failed to initialize any Mistral endpoint.")
+    st.code(traceback.format_exc())
+    st.stop()
+
+with st.sidebar:
+    st.markdown("### Settings")
+    st.write("Using Mistral model:", f"`{ACTIVE_MODEL}`")
+    st.caption("The app auto-selects the first available Mistral endpoint.")
+
+# ---------------------------- HELPERS ----------------------------
 def build_prompt(system_prompt: str, history: list[tuple[str, str]], user_block: str) -> str:
-    """
-    Convert (system + history + user) into a single text prompt for text_generation.
-    history: list of (user_text, assistant_text)
-    """
     lines = []
     if system_prompt.strip():
         lines.append("System:\n" + system_prompt.strip())
     if history:
-        for u, a in history[-3:]:  # keep last 3 turns to stay concise
+        for u, a in history[-3:]:  # keep last 3 turns
             lines.append("User:\n" + (u or ""))
             lines.append("Assistant:\n" + (a or ""))
     lines.append("User:\n" + user_block.strip())
@@ -61,9 +95,6 @@ def build_prompt(system_prompt: str, history: list[tuple[str, str]], user_block:
     return "\n\n".join(lines)
 
 def call_llm_text_generation(prompt: str) -> str:
-    """
-    Use serverless-friendly text_generation. No streaming here (simpler for Cloud).
-    """
     return client.text_generation(
         prompt,
         max_new_tokens=700,
@@ -72,8 +103,8 @@ def call_llm_text_generation(prompt: str) -> str:
         stream=False,
     )
 
-# ---------------------------- UI --------------------------
-st.title("📚 Sahayak — Indic Study Buddy")
+# ---------------------------- UI ----------------------------
+st.title("📚 Sahayak — Indic Study Buddy (Mistral)")
 st.caption("Paste your study text, choose a mode, and get a Summary, Flashcards, or Quiz — in the same language you use.")
 
 mode = st.radio("Choose a mode:", ["Summary", "Flashcards", "Quiz"], horizontal=True)
@@ -82,35 +113,29 @@ if "history" not in st.session_state:
     st.session_state.history = []  # list of (user_text, assistant_text)
 
 with st.form("study_form", clear_on_submit=False):
-    user_text = st.text_area(
-        "Paste your study material here:",
-        height=220,
-        placeholder="Type in Hindi, English, or Hinglish…"
-    )
+    user_text = st.text_area("Paste your study material here:", height=220, placeholder="Type in Hindi, English, or Hinglish…")
     submitted = st.form_submit_button(f"Generate {mode}")
 
-# ---------------------------- RUN --------------------------
+# ---------------------------- RUN ----------------------------
 if submitted and user_text.strip():
-    if not HF_TOKEN:
-        st.error("Missing Hugging Face token. Add it in Streamlit: Settings → Secrets → `HF_TOKEN = \"hf_xxx\"`")
-    else:
-        user_block = f"Mode: {mode}\n\nText:\n{user_text}\n\nReturn the result strictly in the format for {mode}."
-        full_prompt = build_prompt(SYSTEM_PROMPT, st.session_state.history, user_block)
+    user_block = f"Mode: {mode}\n\nText:\n{user_text}\n\nReturn the result strictly in the format for {mode}."
+    full_prompt = build_prompt(SYSTEM_PROMPT, st.session_state.history, user_block)
 
-        try:
-            with st.spinner("Generating…"):
-                reply = call_llm_text_generation(full_prompt)
-            st.session_state.history.append((f"[{mode}] {user_text.strip()}", reply))
-        except Exception as e:
-            st.error(f"Model call failed: {type(e).__name__}: {e}")
-            st.code(traceback.format_exc())
+    try:
+        with st.spinner(f"Generating with {ACTIVE_MODEL}…"):
+            reply = call_llm_text_generation(full_prompt)
+        st.session_state.history.append((f"[{mode}] {user_text.strip()}", reply))
+    except Exception as e:
+        st.error(f"Model call failed: {type(e).__name__}: {e}")
+        st.code(traceback.format_exc())
 
-# ---------------------------- OUTPUT --------------------------
+# ---------------------------- OUTPUT ----------------------------
 if st.session_state.history:
     latest_user, latest_reply = st.session_state.history[-1]
     st.subheader(f"{mode} Output")
     st.write(latest_reply)
 
 st.markdown("---")
-st.markdown("**Tip:** For best results, paste at least 150–200 words. Sahayak will respond in the same language as your input.")
+st.markdown("**Tip:** Paste at least 150–200 words. Sahayak will respond in the same language as your input.")
+
 st.markdown("Developed by [Devam]")
