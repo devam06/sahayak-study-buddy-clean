@@ -1,13 +1,15 @@
-# app.py — Sahayak (Indic Study Buddy) — Mistral-only
-# Summary / Flashcards / Quiz; replies in same language; robust Mistral fallback
+# app.py — Sahayak (Indic Study Buddy) — single model: Mistral-7B-Instruct-v0.3
+# Modes: Summary / Flashcards / Quiz
+# Same-language replies; robust HF token resolution; chat->text fallback; optional debug
 
+import os
 import traceback
 import streamlit as st
 from huggingface_hub import InferenceClient
-
+from huggingface_hub.utils._errors import HfHubHTTPError
 
 # ---------------------------- PAGE CONFIG ----------------------------
-st.set_page_config(page_title="Sahayak — Indic Study Buddy (Mistral)", page_icon="📚")
+st.set_page_config(page_title="Sahayak — Indic Study Buddy (Mistral v0.3)", page_icon="📚", layout="centered")
 
 # ---------------------------- SYSTEM PROMPT --------------------------
 SYSTEM_PROMPT = """
@@ -36,73 +38,83 @@ Guidelines:
 - Be respectful and neutral. Do not give definitive medical, legal, or financial advice.
 """
 
-# ---------------------------- TOKEN ----------------------------
-HF_TOKEN = st.secrets.get("HF_TOKEN")
-if not HF_TOKEN:
-    st.error('Missing HF token. In Streamlit: Settings → Secrets → add\n\nHF_TOKEN = "hf_xxx"\n\nthen Restart.')
-    st.stop()
+# ---------------------------- TOKEN & MODEL ----------------------------
+MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"  # fixed, single model
 
-# ---------------------------- MISTRAL-ONLY CANDIDATES ----------------------------
-# We will try these Mistral-family models in order until one works on the serverless API.
-MISTRAL_MODELS = [
-    "mistralai/Mistral-7B-Instruct-v0.3",
-    
-]
-
-def get_mistral_client():
-    if "ACTIVE_MODEL" in st.session_state and "HF_CLIENT" in st.session_state:
-        return st.session_state.HF_CLIENT, st.session_state.ACTIVE_MODEL
-
-    last_err = None
-    for mid in MISTRAL_MODELS:
-        try:
-            cli = InferenceClient(model=mid, token=HF_TOKEN)
-            # Tiny probe to confirm the endpoint exists
-            _ = cli.text_generation("ping", max_new_tokens=1, return_full_text=False, stream=False)
-            st.session_state.ACTIVE_MODEL = mid
-            st.session_state.HF_CLIENT = cli
-            return cli, mid
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"No Mistral serverless endpoint responded. Last error: {type(last_err).__name__}: {last_err}")
-
-try:
-    client, ACTIVE_MODEL = get_mistral_client()
-except Exception as e:
-    st.error("Failed to initialize any Mistral endpoint.")
-    st.code(traceback.format_exc())
-    st.stop()
+def resolve_hf_token() -> str | None:
+    # 1) Streamlit Secrets (Cloud or local .streamlit/secrets.toml)
+    tok = st.secrets.get("HF_TOKEN") if hasattr(st, "secrets") else None
+    if tok:
+        return tok
+    # 2) Environment (useful for local dev)
+    for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(k):
+            return os.environ[k]
+    return None
 
 with st.sidebar:
-    st.markdown("### Settings")
-    st.write("Using Mistral model:", f"`{ACTIVE_MODEL}`")
-    st.caption("The app auto-selects the first available Mistral endpoint.")
+    st.header("Settings")
+    show_debug = st.toggle("Show debug errors", value=False, help="Print full Python tracebacks on errors")
+    HF_TOKEN = resolve_hf_token()
+    st.write("HF token found:", bool(HF_TOKEN))
+    st.caption('If False, set Secrets → `HF_TOKEN = "hf_xxx"` (Cloud) or create `.streamlit/secrets.toml` locally.')
+
+if not HF_TOKEN:
+    st.error(
+        "Missing Hugging Face token.\n\n"
+        "• Streamlit Cloud: Settings → Secrets → add `HF_TOKEN = \"hf_xxx\"`, then Restart.\n"
+        "• Local: create `.streamlit/secrets.toml` with the same line."
+    )
+    st.stop()
+
+client = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
 
 # ---------------------------- HELPERS ----------------------------
-def build_prompt(system_prompt: str, history: list[tuple[str, str]], user_block: str) -> str:
-    lines = []
-    if system_prompt.strip():
-        lines.append("System:\n" + system_prompt.strip())
-    if history:
-        for u, a in history[-3:]:  # keep last 3 turns
-            lines.append("User:\n" + (u or ""))
-            lines.append("Assistant:\n" + (a or ""))
-    lines.append("User:\n" + user_block.strip())
-    lines.append("Assistant:\n")
-    return "\n\n".join(lines)
+def call_llm(system_prompt: str, history: list[tuple[str, str]], user_block: str, max_tokens: int = 700, temperature: float = 0.4) -> str:
+    """
+    1) Try chat_completion (if supported by the endpoint).
+    2) Fallback to text_generation with a simple chat template.
+    """
+    # Build chat messages
+    messages = [{"role": "system", "content": system_prompt}]
+    for u, a in history[-3:]:  # keep last 3 turns
+        messages.append({"role": "user", "content": u})
+        messages.append({"role": "assistant", "content": a})
+    messages.append({"role": "user", "content": user_block})
 
-def call_llm_text_generation(prompt: str) -> str:
-    return client.text_generation(
-        prompt,
-        max_new_tokens=700,
-        temperature=0.4,
-        return_full_text=False,
-        stream=False,
-    )
+    # Try chat_completion first
+    try:
+        out = client.chat_completion(messages=messages, max_tokens=max_tokens, temperature=temperature)
+        return out.choices[0].message["content"]
+    except Exception as e1:
+        if show_debug:
+            st.error(f"chat_completion failed: {type(e1).__name__}: {e1}")
+            st.code(traceback.format_exc())
+        # Fallback to text_generation with a flattened prompt
+        lines = []
+        for m in messages:
+            if m["role"] == "system":
+                lines.append("System:\n" + m["content"])
+            elif m["role"] == "user":
+                lines.append("User:\n" + m["content"])
+            elif m["role"] == "assistant":
+                lines.append("Assistant:\n" + m["content"])
+        prompt = "\n\n".join(lines) + "\n\nAssistant:\n"
+        try:
+            return client.text_generation(
+                prompt,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                return_full_text=False,
+                stream=False,
+            )
+        except HfHubHTTPError as e2:
+            raise e2
+        except Exception as e3:
+            raise e3
 
 # ---------------------------- UI ----------------------------
-st.title("📚 Sahayak — Indic Study Buddy (Mistral)")
+st.title("📚 Sahayak — Indic Study Buddy (Mistral v0.3)")
 st.caption("Paste your study text, choose a mode, and get a Summary, Flashcards, or Quiz — in the same language you use.")
 
 mode = st.radio("Choose a mode:", ["Summary", "Flashcards", "Quiz"], horizontal=True)
@@ -111,21 +123,28 @@ if "history" not in st.session_state:
     st.session_state.history = []  # list of (user_text, assistant_text)
 
 with st.form("study_form", clear_on_submit=False):
-    user_text = st.text_area("Paste your study material here:", height=220, placeholder="Type in Hindi, English, or Hinglish…")
+    user_text = st.text_area(
+        "Paste your study material here:",
+        height=240,
+        placeholder="Type in Hindi, English, or Hinglish…",
+    )
     submitted = st.form_submit_button(f"Generate {mode}")
 
 # ---------------------------- RUN ----------------------------
 if submitted and user_text.strip():
-    user_block = f"Mode: {mode}\n\nText:\n{user_text}\n\nReturn the result strictly in the format for {mode}."
-    full_prompt = build_prompt(SYSTEM_PROMPT, st.session_state.history, user_block)
-
+    user_block = (
+        f"Mode: {mode}\n\n"
+        f"Text:\n{user_text.strip()}\n\n"
+        f"Return the result strictly in the format for {mode}."
+    )
     try:
-        with st.spinner(f"Generating with {ACTIVE_MODEL}…"):
-            reply = call_llm_text_generation(full_prompt)
+        with st.spinner(f"Generating with {MODEL_ID}…"):
+            reply = call_llm(SYSTEM_PROMPT, st.session_state.history, user_block, max_tokens=700, temperature=0.4)
         st.session_state.history.append((f"[{mode}] {user_text.strip()}", reply))
     except Exception as e:
         st.error(f"Model call failed: {type(e).__name__}: {e}")
-        st.code(traceback.format_exc())
+        if show_debug:
+            st.code(traceback.format_exc())
 
 # ---------------------------- OUTPUT ----------------------------
 if st.session_state.history:
