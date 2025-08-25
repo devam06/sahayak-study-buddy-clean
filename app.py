@@ -30,13 +30,13 @@ Examples:
 
 
 # ---------- 2) MODEL CHOICE ----------
-MODEL_ID = "google/gemma-2-9b-it"
+MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
 
 # Create a client.
 # If you set a token in Streamlit secrets as HF_TOKEN, the hub lib will pick it up automatically.
 
 
-MODEL_ID = "google/gemma-2-9b-it"
+MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
 
 # Pick up token from secrets
 HF_TOKEN = st.secrets.get("HF_TOKEN")
