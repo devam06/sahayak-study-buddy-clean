@@ -28,6 +28,44 @@ Examples:
 - Input: “samay kya hai?” → Output in Hinglish style.
 """
 
+def call_llm_with_fallback(system_prompt: str, history: list, user_content: str):
+    """
+    Tries chat API; if 404/unsupported, falls back to text_generation with a chat-like prompt.
+    history: list of (user, assistant) tuples
+    """
+    # Build messages
+    messages = [{"role": "system", "content": system_prompt}]
+    for u, a in history:
+        messages.append({"role": "user", "content": u})
+        messages.append({"role": "assistant", "content": a})
+    messages.append({"role": "user", "content": user_content})
+
+    # 1) Try chat_completion (works if the endpoint supports it)
+    try:
+        out = client.chat_completion(messages=messages, max_tokens=700, temperature=0.4)
+        return out.choices[0].message["content"]
+    except Exception:
+        pass
+
+    # 2) Fallback: flatten to a single prompt for text_generation
+    lines = []
+    for m in messages:
+        if m["role"] == "system":
+            lines.append("System:\n" + m["content"])
+        elif m["role"] == "user":
+            lines.append("User:\n" + m["content"])
+        elif m["role"] == "assistant":
+            lines.append("Assistant:\n" + m["content"])
+    prompt = "\n\n".join(lines) + "\n\nAssistant:\n"
+
+    return client.text_generation(
+        prompt,
+        max_new_tokens=700,
+        temperature=0.4,
+        stream=False,
+        return_full_text=False,
+    )
+
 
 # ---------- 2) MODEL CHOICE ----------
 MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
@@ -63,8 +101,46 @@ def call_model(user_text, history, mode):
         messages.append({"role": "assistant", "content": a})
     messages.append({"role": "user", "content": f"Mode: {mode}\n\nText: {user_text}"})
 
-    output = client.chat_completion(messages=messages, max_tokens=700, temperature=0.4)
-    return output.choices[0].message["content"]
+    def call_llm_with_fallback(system_prompt: str, history: list, user_content: str):
+    """
+    Tries chat API; if 404/unsupported, falls back to text_generation with a chat-like prompt.
+    history: list of (user, assistant) tuples
+    """
+    # Build messages
+    messages = [{"role": "system", "content": system_prompt}]
+    for u, a in history:
+        messages.append({"role": "user", "content": u})
+        messages.append({"role": "assistant", "content": a})
+    messages.append({"role": "user", "content": user_content})
+
+    # 1) Try chat_completion (works if supported)
+    try:
+        out = client.chat_completion(messages=messages, max_tokens=700, temperature=0.4)
+        return out.choices[0].message["content"]
+    except Exception:
+        pass
+
+    # 2) Fallback: flatten messages for text_generation
+    lines = []
+    for m in messages:
+        if m["role"] == "system":
+            lines.append("System:\n" + m["content"])
+        elif m["role"] == "user":
+            lines.append("User:\n" + m["content"])
+        elif m["role"] == "assistant":
+            lines.append("Assistant:\n" + m["content"])
+    prompt = "\n\n".join(lines) + "\n\nAssistant:\n"
+
+    return client.text_generation(
+        prompt,
+        max_new_tokens=700,
+        temperature=0.4,
+        stream=False,
+        return_full_text=False,
+    )
+
+    reply = call_llm_with_fallback(SYSTEM_PROMPT, st.session_state.history, f"Mode: {mode}\n\nText:\n{user_text}")
+    
 
 # ---------- INPUT ----------
 with st.form("study_form", clear_on_submit=True):
