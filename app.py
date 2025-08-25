@@ -4,7 +4,7 @@
 import traceback
 import streamlit as st
 from huggingface_hub import InferenceClient
-from huggingface_hub.utils._errors import HfHubHTTPError
+
 
 # ---------------------------- PAGE CONFIG ----------------------------
 st.set_page_config(page_title="Sahayak — Indic Study Buddy (Mistral)", page_icon="📚")
@@ -46,9 +46,7 @@ if not HF_TOKEN:
 # We will try these Mistral-family models in order until one works on the serverless API.
 MISTRAL_MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3",
-    "mistralai/Mistral-Nemo-Instruct-2407",
-    "mistralai/Mixtral-8x7B-Instruct-v0.1",
-    "mistralai/Mistral-7B-Instruct-v0.2",
+    
 ]
 
 def get_mistral_client():
