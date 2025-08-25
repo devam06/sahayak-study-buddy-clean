@@ -1,5 +1,6 @@
-# app.py — Sahayak (Indic Study Buddy) — simple UI, Cloud-safe
-# Uses HF text_generation (robust) + same-language replies + Summary/Flashcards/Quiz modes
+# app.py — Sahayak (Indic Study Buddy)
+# Simple version with Summary / Flashcards / Quiz
+# Uses text_generation (serverless-friendly) + fixed model ID
 
 import os
 import traceback
@@ -37,32 +38,10 @@ Guidelines:
 """
 
 # ---------------------------- TOKEN & MODEL --------------------------
-def resolve_hf_token():
-    # 1) Streamlit secrets (Cloud or local .streamlit/secrets.toml)
-    tok = st.secrets.get("HF_TOKEN", None)
-    if tok:
-        return tok
-    # 2) Environment variables (if you prefer)
-    for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(k):
-            return os.environ[k]
-    # 3) Optional manual paste in sidebar (set below)
-    return st.session_state.get("HF_TOKEN", None)
+HF_TOKEN = st.secrets.get("HF_TOKEN")
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"   # ✅ fixed ID
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # reliable text-generation endpoint
-
-with st.sidebar:
-    st.header("Settings")
-    model_id = st.text_input("Model ID", value=DEFAULT_MODEL, help="Try Qwen2.5-7B, Zephyr-7B, Falcon-7B, etc.")
-    pasted = st.text_input("HF Token (paste here if not in Secrets)", type="password")
-    if pasted:
-        st.session_state["HF_TOKEN"] = pasted
-    HF_TOKEN = resolve_hf_token()
-    st.write("HF token found:", bool(HF_TOKEN))
-    st.caption("Tip: Add token in Settings → Secrets as: HF_TOKEN = \"hf_xxx\"")
-
-# Create client (no chat API assumptions)
-client = InferenceClient(model=model_id, token=HF_TOKEN)
+client = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
 
 # ---------------------------- HELPERS --------------------------
 def build_prompt(system_prompt: str, history: list[tuple[str, str]], user_block: str) -> str:
@@ -103,7 +82,11 @@ if "history" not in st.session_state:
     st.session_state.history = []  # list of (user_text, assistant_text)
 
 with st.form("study_form", clear_on_submit=False):
-    user_text = st.text_area("Paste your study material here:", height=220, placeholder="Type in Hindi, English, or Hinglish…")
+    user_text = st.text_area(
+        "Paste your study material here:",
+        height=220,
+        placeholder="Type in Hindi, English, or Hinglish…"
+    )
     submitted = st.form_submit_button(f"Generate {mode}")
 
 # ---------------------------- RUN --------------------------
@@ -130,4 +113,4 @@ if st.session_state.history:
 
 st.markdown("---")
 st.markdown("**Tip:** For best results, paste at least 150–200 words. Sahayak will respond in the same language as your input.")
-
+st.markdown("Developed by [Devam]")
